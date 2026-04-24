@@ -1,0 +1,15 @@
+[project]
+name = "medbill-advocate"
+version = "0.1.0"
+description = "A Streamlit prototype that explains medical bills and drafts patient advocacy scripts."
+requires-python = ">=3.11"
+dependencies = [
+    "openai",
+    "pdfplumber",
+    "pillow",
+    "python-dotenv",
+    "streamlit",
+]
+
+[tool.uv]
+package = false
