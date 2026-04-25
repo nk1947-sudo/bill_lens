@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     ANALYSIS_MODEL: str = "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
     ADVOCACY_MODEL: str = "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
 
+    DEMO_MODE: bool = False
+
     CORS_ORIGINS: str = '["http://localhost:5173","http://localhost"]'
 
     def get_cors_origins(self) -> List[str]:

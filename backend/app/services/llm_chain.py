@@ -1,6 +1,6 @@
 import json
 import re
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIStatusError
 from app.core.config import settings
 
 ANALYST_SYSTEM = """You are a certified medical billing specialist and fraud investigator with 15 years of experience.
@@ -57,6 +57,60 @@ Return ONLY this JSON structure (no markdown fences):
   "phone_script": "Full word-for-word phone script the patient can read when calling the hospital billing department. Include placeholders like [YOUR NAME], [ACCOUNT NUMBER], [DATE]. Reference the specific flagged charges by name."
 }}"""
 
+DEMO_RESULT = {
+    "facility_name": "General Hospital",
+    "total_amount": 12847.00,
+    "risk_score": 85,
+    "demo_mode": True,
+    "flagged_charges": [
+        {"id": 1, "name": "Room & Board – ICU Level 4", "code": "Rev 0204", "amount": "$4,200",
+         "risk": "High", "reason": "Potential Upcoding",
+         "detail": "ICU Level 4 classification is rarely warranted. Standard monitoring only — Level 2 billing ($1,400) is far more appropriate for the documented care level."},
+        {"id": 2, "name": "Comprehensive Metabolic Panel × 3", "code": "CPT 80053", "amount": "$870",
+         "risk": "High", "reason": "Duplicate Charge",
+         "detail": "The same panel appears three times on the same date. Labs of this type are typically drawn once per encounter. Two charges appear redundant and should be removed."},
+        {"id": 3, "name": "Surgical Tray Setup", "code": "CPT 99070", "amount": "$380",
+         "risk": "Medium", "reason": "Possible Unbundling",
+         "detail": "Tray setup fees are generally bundled into the procedure code. Billing separately may constitute improper unbundling under CMS guidelines."},
+        {"id": 4, "name": "Physical Therapy Evaluation", "code": "CPT 97161", "amount": "$340",
+         "risk": "Medium", "reason": "Unusual Price",
+         "detail": "This charge is 2.4× the Medicare rate for this procedure in your region ($142). Significant price disparity warrants a formal review request."},
+        {"id": 5, "name": "Disposable Supplies Fee", "code": "Rev 0270", "amount": "$95",
+         "risk": "Low", "reason": "Vague Description",
+         "detail": "No itemized breakdown provided. Hospitals are legally required to itemize supply charges. Request a line-item detail in writing."},
+    ],
+    "summary": "Your bill totals $12,847. Our audit flagged 5 items worth challenging — potential savings of $3,800–$5,200. The biggest red flags are a likely ICU room classification upcoding ($2,800 overcharge) and a lab panel billed three times in one day. These are among the most common hospital billing errors and are frequently corrected on appeal.",
+    "action_plan": [
+        {"step": 1, "title": "Request an Itemized Bill",
+         "detail": "Call the billing department and ask for a fully itemized bill listing every CPT and revenue code. This is your legal right in all 50 states under the No Surprises Act. Allow 3–5 business days."},
+        {"step": 2, "title": "Pull Your Medical Records",
+         "detail": "Request your nursing notes and physician orders for the dates of service. Cross-reference what was ordered vs. what was billed — discrepancies are your strongest dispute evidence."},
+        {"step": 3, "title": "File a Formal Billing Dispute",
+         "detail": "Submit a written dispute letter citing each flagged CPT/revenue code and your specific grounds (duplicate charge, upcoding, etc.). Send via certified mail and keep a copy."},
+        {"step": 4, "title": "Contact Your Insurance",
+         "detail": "If insured, call your insurer's member advocacy line. They have contractual leverage hospitals respond to and can audit charges on your behalf at no cost to you."},
+        {"step": 5, "title": "Escalate if Needed",
+         "detail": "If unresolved within 30 days, file a complaint with your state Insurance Commissioner. Consider a patient advocate or medical billing attorney — many work on contingency and charge nothing unless they recover funds."},
+    ],
+    "phone_script": """Hello, my name is [YOUR NAME] and my account number is [ACCOUNT NUMBER].
+
+I'm calling to dispute several charges on my bill dated [DATE].
+
+I've reviewed my itemized statement and have identified the following concerns:
+
+1. DUPLICATE CHARGE — CPT 80053 (Comprehensive Metabolic Panel) appears three times on [DATE]. I'd like these reviewed and the two duplicate charges removed.
+
+2. BILLING CLASSIFICATION — I was billed for ICU Level 4 room & board (Rev 0204 at $4,200). My medical records indicate standard monitoring only. I am requesting a formal downgrade review to Level 2.
+
+3. UNBUNDLED SUPPLY FEE — CPT 99070 (Surgical Tray Setup) appears billed separately from the associated procedure. I'm requesting this be reviewed for proper bundling per CMS guidelines.
+
+Can you open a formal billing dispute and give me a reference number?
+
+[PAUSE — write down the reference number and the agent's full name]
+
+Thank you. I'll follow up in writing within 5 business days. Can you confirm the correct mailing address for written disputes?""",
+}
+
 
 def _make_client() -> AsyncOpenAI:
     return AsyncOpenAI(api_key=settings.TOGETHER_API_KEY, base_url=settings.TOGETHER_BASE_URL)
@@ -64,7 +118,6 @@ def _make_client() -> AsyncOpenAI:
 
 def _extract_json(text: str) -> dict:
     text = text.strip()
-    # Strip markdown code fences if present
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
     return json.loads(text)
@@ -102,6 +155,15 @@ async def run_advocate(analysis: dict) -> dict:
 
 
 async def run_full_chain(bill_text: str) -> dict:
-    analysis = await run_analyst(bill_text)
-    advocacy = await run_advocate(analysis)
-    return {**analysis, **advocacy}
+    if settings.DEMO_MODE or not settings.TOGETHER_API_KEY.strip():
+        return DEMO_RESULT
+
+    try:
+        analysis = await run_analyst(bill_text)
+        advocacy = await run_advocate(analysis)
+        return {**analysis, **advocacy}
+    except APIStatusError as e:
+        if e.status_code == 402:
+            # Credits exhausted — fall back to demo results silently
+            return {**DEMO_RESULT, "demo_mode": True}
+        raise

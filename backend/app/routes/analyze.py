@@ -1,12 +1,14 @@
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from datetime import datetime
-from bson import ObjectId
+from openai import APIStatusError
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.services.ocr import extract_bill_text
 from app.services.llm_chain import run_full_chain
+import logging
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/analyze", tags=["analyze"])
 
 ALLOWED_TYPES = {"application/pdf", "image/png", "image/jpeg", "image/jpg", "image/webp"}
@@ -27,12 +29,26 @@ async def analyze_bill(
         raise HTTPException(status_code=413, detail="File too large. Maximum size is 10 MB.")
 
     # Step 1: Extract text
-    bill_text = await extract_bill_text(content, file.content_type)
+    try:
+        bill_text = await extract_bill_text(content, file.content_type)
+    except Exception as e:
+        logger.exception("OCR extraction failed")
+        raise HTTPException(status_code=422, detail=f"Could not extract text from file: {str(e)}")
+
     if not bill_text.strip():
-        raise HTTPException(status_code=422, detail="Could not extract text from the uploaded file.")
+        raise HTTPException(status_code=422, detail="No readable text found in the uploaded file.")
 
     # Steps 2 & 3: Analyst → Advocate LLM chain
-    analysis = await run_full_chain(bill_text)
+    try:
+        analysis = await run_full_chain(bill_text)
+    except APIStatusError as e:
+        logger.error("LLM API error: %s", e)
+        if e.status_code == 402:
+            raise HTTPException(status_code=503, detail="AI service credits exhausted. Set DEMO_MODE=true in backend/.env to use demo results.")
+        raise HTTPException(status_code=502, detail=f"AI service error: {e.message}")
+    except Exception as e:
+        logger.exception("LLM chain failed")
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
     # Persist to MongoDB
     bill_doc = {
